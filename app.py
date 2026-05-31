@@ -1,4 +1,5 @@
 import os
+import pickle
 import uuid
 
 from flask import Flask, jsonify, render_template, request, session
@@ -6,17 +7,31 @@ from flask import Flask, jsonify, render_template, request, session
 from analysis import run_analysis, analyze_cohort
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-cambiar-en-produccion")
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB
 
 ALLOWED = {"xlsx", "xls", "csv"}
 
-# Server-side data cache: token → {pob_unico, resumen, ciclos, df_T}
-_cache: dict = {}
+# File-based cache in /tmp (works on Vercel serverless + locally)
+CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp")
 
 
 def _allowed(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED
+
+
+def _save_cache(token: str, data: dict) -> None:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(os.path.join(CACHE_DIR, f"tray_{token}.pkl"), "wb") as f:
+        pickle.dump(data, f)
+
+
+def _load_cache(token: str) -> dict | None:
+    path = os.path.join(CACHE_DIR, f"tray_{token}.pkl")
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    return None
 
 
 @app.route("/")
@@ -46,7 +61,7 @@ def analyze():
 
         token = str(uuid.uuid4())
         session["token"] = token
-        _cache[token] = cache
+        _save_cache(token, cache)
 
         return render_template("dashboard.html", **ctx)
 
@@ -59,12 +74,14 @@ def analyze():
 @app.route("/api/cohort")
 def api_cohort():
     token = session.get("token")
-    if not token or token not in _cache:
+    if not token:
+        return jsonify({"error": "Sesión expirada. Sube el archivo nuevamente."}), 400
+
+    cache = _load_cache(token)
+    if cache is None:
         return jsonify({"error": "Sesión expirada. Sube el archivo nuevamente."}), 400
 
     ciclo = request.args.get("ciclo", "")
-    cache = _cache[token]
-
     if ciclo not in cache["ciclos"]:
         return jsonify({"error": "Generación no encontrada."}), 400
 
@@ -80,7 +97,7 @@ def api_cohort():
 
 @app.route("/demo")
 def demo():
-    """Load dashboard using local sample files (only works when running locally)."""
+    """Carga el dashboard con los archivos de muestra locales."""
     base = os.path.join(os.path.dirname(__file__), "..")
     mat_path = os.path.join(base, "BaseDatosMaterias.xlsx")
     tit_path = os.path.join(base, "Titulaciones.xlsx")
@@ -96,7 +113,7 @@ def demo():
         ctx, cache = run_analysis(mat_data, "BaseDatosMaterias.xlsx", tit_data)
         token = str(uuid.uuid4())
         session["token"] = token
-        _cache[token] = cache
+        _save_cache(token, cache)
         return render_template("dashboard.html", **ctx)
     except Exception as e:
         return f"Error: {e}", 500
