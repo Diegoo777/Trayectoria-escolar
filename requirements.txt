@@ -1,0 +1,6 @@
+flask>=3.0
+pandas>=2.1
+openpyxl>=3.1
+plotly>=5.20
+numpy>=1.26
+gunicorn>=22.0
